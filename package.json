@@ -1,0 +1,68 @@
+{
+  "name": "code-context-map",
+  "displayName": "code context map",
+  "description": "",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.101.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "code-context-map.showMap",
+        "title": "Show Code Context Map",
+        "category": "Code Context Navigator"
+      },
+      {
+        "command": "code-context-map.refreshMap",
+        "title": "Refresh Code Context Map",
+        "category": "Code Context Navigator"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "code-context-map.showMap",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "code-context-map.showMap",
+          "group": "navigation"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "code-context-map.showMap",
+        "key": "ctrl+shift+m",
+        "mac": "cmd+shift+m"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.101.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "20.x",
+    "@typescript-eslint/eslint-plugin": "^8.31.1",
+    "@typescript-eslint/parser": "^8.31.1",
+    "eslint": "^9.25.1",
+    "typescript": "^5.8.3",
+    "@vscode/test-cli": "^0.0.10",
+    "@vscode/test-electron": "^2.5.2"
+  }
+}

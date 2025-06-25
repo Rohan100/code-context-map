@@ -7,6 +7,7 @@ export interface GraphNode {
     column?: number;
     size?: number;
     dependencies?: string[];
+    isActiveFile?: boolean;
 }
 
 export interface GraphEdge {

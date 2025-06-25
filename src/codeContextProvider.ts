@@ -7,25 +7,38 @@ export class CodeContextProvider implements vscode.Disposable {
     private panel?: vscode.WebviewPanel;
     private analyzer: CodeAnalyzer;
     private currentGraphData?: GraphData;
+    private currentActiveFile?: string;
 
     constructor(private readonly extensionUri: vscode.Uri) {
         this.analyzer = new CodeAnalyzer();
     }
 
     public async showCodeMap() {
-        // Check if we have a workspace or active file
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        // Check if we have an active file
         const activeEditor = vscode.window.activeTextEditor;
         
-        if (!workspaceFolder && !activeEditor) {
+        if (!activeEditor) {
             vscode.window.showErrorMessage(
-                'Please open a folder or a TypeScript/JavaScript file to use Code Context Navigator'
+                'Please open a TypeScript/JavaScript file to use Code Context Navigator'
+            );
+            return;
+        }
+
+        // Check if it's a supported file type
+        const filePath = activeEditor.document.uri.fsPath;
+        if (!/\.(ts|tsx|js|jsx)$/.test(filePath) || filePath.endsWith('.d.ts')) {
+            vscode.window.showErrorMessage(
+                'Code Context Navigator only supports TypeScript and JavaScript files'
             );
             return;
         }
 
         if (this.panel) {
             this.panel.reveal(vscode.ViewColumn.Beside);
+            // If different file is active, refresh the map
+            if (this.currentActiveFile !== filePath) {
+                await this.refreshMapForActiveFile();
+            }
             return;
         }
 
@@ -53,7 +66,10 @@ export class CodeContextProvider implements vscode.Disposable {
                         await this.showReferences(message.nodeId);
                         break;
                     case 'ready':
-                        await this.refreshMap();
+                        await this.refreshMapForActiveFile();
+                        break;
+                    case 'refreshForActiveFile':
+                        await this.refreshMapForActiveFile();
                         break;
                 }
             }
@@ -61,49 +77,90 @@ export class CodeContextProvider implements vscode.Disposable {
 
         this.panel.onDidDispose(() => {
             this.panel = undefined;
+            this.currentActiveFile = undefined;
         });
     }
 
-    public async refreshMap() {
+    public async refreshMapForActiveFile() {
         if (!this.panel) {
             return;
         }
 
-        // Try to get workspace folder, or use current file's directory
-        let workspacePath: string | undefined;
-        
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-        if (workspaceFolder) {
-            workspacePath = workspaceFolder.uri.fsPath;
-        } else {
-            // If no workspace, try to use the current active file's directory
-            const activeEditor = vscode.window.activeTextEditor;
-            if (activeEditor) {
-                const currentFilePath = activeEditor.document.uri.fsPath;
-                workspacePath = path.dirname(currentFilePath);
-                
-                // Show info message about limited scope
-                vscode.window.showInformationMessage(
-                    'No workspace folder found. Analyzing current file directory: ' + path.basename(workspacePath)
-                );
-            } else {
-                vscode.window.showErrorMessage(
-                    'No workspace folder found and no active file. Please open a folder or file to analyze.'
-                );
-                return;
-            }
+        const activeEditor = vscode.window.activeTextEditor;
+        if (!activeEditor) {
+            vscode.window.showErrorMessage('No active file to analyze');
+            return;
         }
 
+        const activeFilePath = activeEditor.document.uri.fsPath;
+        
+        // Check if it's a supported file type
+        if (!/\.(ts|tsx|js|jsx)$/.test(activeFilePath) || activeFilePath.endsWith('.d.ts')) {
+            this.panel.webview.postMessage({
+                command: 'showMessage',
+                message: 'Please switch to a TypeScript or JavaScript file'
+            });
+            return;
+        }
+
+        this.currentActiveFile = activeFilePath;
+
         try {
-            this.currentGraphData = await this.analyzer.analyzeWorkspace(workspacePath);
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            const workspacePath = workspaceFolder ? workspaceFolder.uri.fsPath : undefined;
+            
+            vscode.window.showInformationMessage(
+                `Analyzing function calls from: ${path.basename(activeFilePath)}`
+            );
+
+            this.currentGraphData = await this.analyzer.analyzeActiveFile(activeFilePath, workspacePath);
+            
             this.panel.webview.postMessage({
                 command: 'updateGraph',
-                data: this.currentGraphData
+                data: this.currentGraphData,
+                activeFile: activeFilePath
             });
+
+            console.log('Active file analysis complete:', this.currentGraphData);
+            
+            const functionCount = this.currentGraphData.nodes.filter(n => n.type === 'function').length;
+            const callCount = this.currentGraphData.edges.filter(e => e.type === 'calls').length;
+            
+            vscode.window.showInformationMessage(
+                `Found ${functionCount} functions with ${callCount} function calls`
+            );
+
         } catch (error) {
-            console.error('Error analyzing workspace:', error);
-            vscode.window.showErrorMessage('Error analyzing workspace: ' + error);
+            console.error('Error analyzing active file:', error);
+            vscode.window.showErrorMessage('Error analyzing active file: ' + error);
         }
+    }
+
+    // Legacy method for backward compatibility
+    public async refreshMap() {
+        await this.refreshMapForActiveFile();
+    }
+
+    public async onActiveEditorChanged(editor?: vscode.TextEditor) {
+        if (!this.panel || !editor) {
+            return;
+        }
+
+        const filePath = editor.document.uri.fsPath;
+        
+        // Only refresh if it's a different supported file
+        if (this.currentActiveFile !== filePath && 
+            /\.(ts|tsx|js|jsx)$/.test(filePath) && 
+            !filePath.endsWith('.d.ts')) {
+            
+            await this.refreshMapForActiveFile();
+        }
+
+        // Highlight the current file in the graph
+        this.panel.webview.postMessage({
+            command: 'highlightFile',
+            filePath: filePath
+        });
     }
 
     public async onFileChanged(uri: vscode.Uri) {
@@ -111,17 +168,13 @@ export class CodeContextProvider implements vscode.Disposable {
             return;
         }
 
-        try {
-            const updatedData = await this.analyzer.analyzeFile(uri.fsPath);
-            // Merge the updated data with current graph data
-            this.mergeGraphData(updatedData);
+        const changedFilePath = uri.fsPath;
+
+        // If the changed file is the active file or affects the current graph, refresh
+        if (this.currentActiveFile === changedFilePath || 
+            this.currentGraphData.nodes.some(node => node.filePath === changedFilePath)) {
             
-            this.panel.webview.postMessage({
-                command: 'updateGraph',
-                data: this.currentGraphData
-            });
-        } catch (error) {
-            console.error('Error analyzing changed file:', error);
+            await this.refreshMapForActiveFile();
         }
     }
 
@@ -130,29 +183,12 @@ export class CodeContextProvider implements vscode.Disposable {
             return;
         }
 
-        // Remove nodes and edges related to the deleted file
-        const filePath = uri.fsPath;
-        this.currentGraphData.nodes = this.currentGraphData.nodes.filter(node => node.filePath !== filePath);
-        this.currentGraphData.edges = this.currentGraphData.edges.filter(edge => 
-            !edge.source.includes(filePath) && !edge.target.includes(filePath)
-        );
+        const deletedFilePath = uri.fsPath;
 
-        this.panel.webview.postMessage({
-            command: 'updateGraph',
-            data: this.currentGraphData
-        });
-    }
-
-    public onActiveEditorChanged(editor: vscode.TextEditor) {
-        if (!this.panel) {
-            return;
+        // If the deleted file was part of the current graph, refresh
+        if (this.currentGraphData.nodes.some(node => node.filePath === deletedFilePath)) {
+            this.refreshMapForActiveFile();
         }
-
-        const filePath = editor.document.uri.fsPath;
-        this.panel.webview.postMessage({
-            command: 'highlightFile',
-            filePath: filePath
-        });
     }
 
     private async navigateToNode(nodeId: string) {
@@ -161,7 +197,12 @@ export class CodeContextProvider implements vscode.Disposable {
         }
 
         const node = this.currentGraphData.nodes.find(n => n.id === nodeId);
-        if (!node) {
+        if (!node || node.filePath === 'unknown') {
+            if (node?.filePath === 'unknown') {
+                vscode.window.showWarningMessage(
+                    `Function "${node.name}" might be from an external library or not found in the workspace`
+                );
+            }
             return;
         }
 
@@ -185,7 +226,7 @@ export class CodeContextProvider implements vscode.Disposable {
         }
 
         const node = this.currentGraphData.nodes.find(n => n.id === nodeId);
-        if (!node) {
+        if (!node || node.filePath === 'unknown') {
             return;
         }
 
@@ -198,33 +239,6 @@ export class CodeContextProvider implements vscode.Disposable {
         } catch (error) {
             vscode.window.showErrorMessage('Could not show references: ' + error);
         }
-    }
-
-    private mergeGraphData(newData: GraphData) {
-        if (!this.currentGraphData) {
-            this.currentGraphData = newData;
-            return;
-        }
-
-        // Simple merge strategy - replace nodes from the same file
-        const newFilePaths = new Set(newData.nodes.map(n => n.filePath));
-        
-        // Remove old nodes from the same files
-        this.currentGraphData.nodes = this.currentGraphData.nodes.filter(
-            node => !newFilePaths.has(node.filePath)
-        );
-        
-        // Add new nodes
-        this.currentGraphData.nodes.push(...newData.nodes);
-        
-        // Remove old edges involving the updated files
-        this.currentGraphData.edges = this.currentGraphData.edges.filter(
-            edge => !newFilePaths.has(edge.source.split(':')[0]) && 
-                   !newFilePaths.has(edge.target.split(':')[0])
-        );
-        
-        // Add new edges
-        this.currentGraphData.edges.push(...newData.edges);
     }
 
     private getWebviewContent(): string {
@@ -378,22 +392,78 @@ export class CodeContextProvider implements vscode.Disposable {
         }
         
         function updateGraph(data) {
+            console.log('Updating graph with data:', data);
+            
+            // Validate input data
+            if (!data || !data.nodes || !data.edges) {
+                console.error('Invalid graph data:', data);
+                return;
+            }
+            
             graphData = data;
             
-            // Process nodes
-            nodes = data.nodes.map(node => ({
-                ...node,
-                id: node.id,
-                x: Math.random() * 800,
-                y: Math.random() * 600
-            }));
+            // Process nodes - create a proper node object with required properties
+            nodes = data.nodes.map((node, index) => {
+                if (!node || !node.id) {
+                    console.error('Invalid node at index', index, ':', node);
+                    return null;
+                }
+                
+                return {
+                    ...node,
+                    // Ensure we have all required properties for D3 simulation
+                    x: node.x || Math.random() * 800,
+                    y: node.y || Math.random() * 600,
+                    vx: 0, // Initialize velocity
+                    vy: 0,
+                    fx: null, // Fixed positions
+                    fy: null
+                };
+            }).filter(node => node !== null);
             
-            // Process links
-            links = data.edges.map(edge => ({
-                source: edge.source,
-                target: edge.target,
-                type: edge.type
-            }));
+            console.log('Valid nodes after processing:', nodes.length);
+            console.log('Node IDs:', nodes.map(n => n.id));
+            
+            // Create a map for quick node lookup
+            const nodeMap = new Map(nodes.map(node => [node.id, node]));
+            
+            // Process links - ensure source and target reference actual node objects
+            links = data.edges.map((edge, index) => {
+                if (!edge || !edge.source || !edge.target) {
+                    console.error('Invalid edge at index', index, ':', edge);
+                    return null;
+                }
+                
+                const sourceNode = nodeMap.get(edge.source);
+                const targetNode = nodeMap.get(edge.target);
+                
+                if (!sourceNode) {
+                    console.warn('Missing source node for edge:', edge.source, 'Available nodes:', Array.from(nodeMap.keys()));
+                    return null;
+                }
+                
+                if (!targetNode) {
+                    console.warn('Missing target node for edge:', edge.target, 'Available nodes:', Array.from(nodeMap.keys()));
+                    return null;
+                }
+                
+                return {
+                    source: sourceNode.id, // Use ID string initially, D3 will convert to object
+                    target: targetNode.id, // Use ID string initially, D3 will convert to object
+                    type: edge.type,
+                    // Store original IDs for reference
+                    sourceId: edge.source,
+                    targetId: edge.target
+                };
+            }).filter(link => link !== null);
+            
+            console.log('Valid links after processing:', links.length);
+            console.log('Links:', links.map(l => \`\${l.source} -> \${l.target}\`));
+            
+            // Stop any existing simulation
+            if (simulation) {
+                simulation.stop();
+            }
             
             // Update the visualization
             updateVisualization();
@@ -402,29 +472,39 @@ export class CodeContextProvider implements vscode.Disposable {
         function updateVisualization() {
             const graphGroup = svg.select('.graph-group');
             
-            // Update links
+            // Clear existing elements to prevent duplication
+            graphGroup.selectAll('*').remove();
+            
+            // Recreate simulation with current data
+            simulation = d3.forceSimulation(nodes)
+                .force('link', d3.forceLink(links)
+                    .id(d => d.id)
+                    .distance(100)
+                )
+                .force('charge', d3.forceManyBody().strength(-300))
+                .force('center', d3.forceCenter(svg.attr('width') / 2, svg.attr('height') / 2))
+                .force('collision', d3.forceCollide().radius(30));
+            
+            // Create links
             linkElements = graphGroup.selectAll('.link')
-                .data(links, d => d.source + '-' + d.target);
-            
-            linkElements.exit().remove();
-            
-            linkElements = linkElements.enter()
+                .data(links)
+                .enter()
                 .append('line')
-                .attr('class', 'link')
-                .merge(linkElements);
+                .attr('class', 'link');
             
-            // Update nodes
-            nodeElements = graphGroup.selectAll('.node')
-                .data(nodes, d => d.id);
-            
-            nodeElements.exit().remove();
-            
-            const nodeEnter = nodeElements.enter()
+            // Create node groups
+            const nodeGroups = graphGroup.selectAll('.node-group')
+                .data(nodes)
+                .enter()
                 .append('g')
-                .attr('class', 'node-group');
+                .attr('class', 'node-group')
+                .call(d3.drag()
+                    .on('start', dragstarted)
+                    .on('drag', dragged)
+                    .on('end', dragended));
             
             // Add shapes based on node type
-            nodeEnter.each(function(d) {
+            nodeGroups.each(function(d) {
                 const group = d3.select(this);
                 
                 if (d.type === 'file') {
@@ -432,20 +512,23 @@ export class CodeContextProvider implements vscode.Disposable {
                         .attr('width', 20)
                         .attr('height', 15)
                         .attr('x', -10)
-                        .attr('y', -7.5);
+                        .attr('y', -7.5)
+                        .attr('class', \`node \${d.type}\`);
                 } else if (d.type === 'class') {
                     group.append('polygon')
-                        .attr('points', '0,-12 12,0 0,12 -12,0');
+                        .attr('points', '0,-12 12,0 0,12 -12,0')
+                        .attr('class', \`node \${d.type}\`);
                 } else {
                     group.append('circle')
-                        .attr('r', 8);
+                        .attr('r', 8)
+                        .attr('class', \`node \${d.type}\`);
                 }
             });
             
-            nodeElements = nodeEnter.merge(nodeElements);
+            nodeElements = nodeGroups;
             
+            // Add event handlers to shapes
             nodeElements.selectAll('rect, circle, polygon')
-                .attr('class', d => \`node \${d.type}\`)
                 .on('click', function(event, d) {
                     vscode.postMessage({
                         command: 'navigateToNode',
@@ -466,23 +549,14 @@ export class CodeContextProvider implements vscode.Disposable {
                     hideTooltip();
                 });
             
-            // Update labels
+            // Create labels
             labelElements = graphGroup.selectAll('.node-label')
-                .data(nodes, d => d.id);
-            
-            labelElements.exit().remove();
-            
-            labelElements = labelElements.enter()
+                .data(nodes)
+                .enter()
                 .append('text')
                 .attr('class', 'node-label')
-                .merge(labelElements)
                 .text(d => d.name)
                 .style('display', showLabels ? 'block' : 'none');
-            
-            // Update simulation
-            simulation.nodes(nodes);
-            simulation.force('link').links(links);
-            simulation.alpha(1).restart();
             
             // Set up tick handler
             simulation.on('tick', () => {
@@ -499,6 +573,26 @@ export class CodeContextProvider implements vscode.Disposable {
                     .attr('x', d => d.x)
                     .attr('y', d => d.y + 20);
             });
+            
+            console.log('Visualization updated successfully');
+        }
+        
+        // Drag functions
+        function dragstarted(event, d) {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            d.fx = d.x;
+            d.fy = d.y;
+        }
+        
+        function dragged(event, d) {
+            d.fx = event.x;
+            d.fy = event.y;
+        }
+        
+        function dragended(event, d) {
+            if (!event.active) simulation.alphaTarget(0);
+            d.fx = null;
+            d.fy = null;
         }
         
         function showTooltip(event, d) {
@@ -506,8 +600,8 @@ export class CodeContextProvider implements vscode.Disposable {
             tooltip.html(\`
                 <strong>\${d.name}</strong><br/>
                 Type: \${d.type}<br/>
-                File: \${d.filePath.split('/').pop()}<br/>
-                \${d.line ? \`Line: \${d.line + 1}\` : ''}
+                File: \${d.filePath.split('/').pop() || d.filePath.split('\\\\').pop()}<br/>
+                \${d.line !== undefined ? \`Line: \${d.line + 1}\` : ''}
             \`)
             .style('left', (event.pageX + 10) + 'px')
             .style('top', (event.pageY - 10) + 'px')

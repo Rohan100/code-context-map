@@ -8,6 +8,7 @@ export interface GraphNode {
     size?: number;
     dependencies?: string[];
     isActiveFile?: boolean;
+    isExternal?: boolean;
 }
 
 export interface GraphEdge {

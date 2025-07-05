@@ -167,7 +167,7 @@ export class CodeAnalyzer {
             });
         });
 
-
+        console.log("activeFunctions", activeFunctions);
         // Build call graph starting from active file functions
         activeFunctions.forEach(func => {
             this.buildCallChain(func.id, functionCallMap, nodes, edges, visitedFunctions);
@@ -186,7 +186,7 @@ export class CodeAnalyzer {
     }
 
     private analyzeFileForCalls(sourceFile: ts.SourceFile, functionCallMap: Map<string, Set<string>>) {
-        const filePath = sourceFile.fileName;
+        const filePath = path.normalize(sourceFile.fileName);
 
         const visit = (node: ts.Node) => {
             // Handle function declarations
@@ -259,7 +259,6 @@ export class CodeAnalyzer {
 
             // Try to resolve in imported files using enhanced resolution
             const importedTarget = this.resolveImportedFunctionEnhanced(functionName, sourceFile, currentFilePath);
-            console.log("impoted Target", importedTarget)
             // debugger
             if (importedTarget) {
                 return importedTarget;
@@ -300,8 +299,6 @@ export class CodeAnalyzer {
     private resolveImportedFunctionEnhanced(functionName: string, sourceFile: ts.SourceFile, currentFilePath: string): string | null {
         // Find import statements and resolve function location
         const imports = this.getImportsFromFile(sourceFile);
-        console.log("imports :->", imports)
-        console.log("current file for imports :->", currentFilePath)
         // debugger
         for (const importInfo of imports) {
             if (importInfo.importedNames.includes(functionName)) {
@@ -413,7 +410,6 @@ export class CodeAnalyzer {
         const type = functionId.substring(0, firstColon);
         const filePath = functionId.substring(firstColon + 1, lastColon);
         const name = functionId.substring(lastColon + 1);
-        console.log(type, filePath, name)
         const sourceFile = this.program!.getSourceFile(filePath);
         if (!sourceFile) return false;
 
@@ -571,11 +567,16 @@ export class CodeAnalyzer {
         }
 
         visitedFunctions.add(functionId);
+        console.log("functionId", functionId)
+        debugger
         const calls = functionCallMap.get(functionId);
-
+        console.log("functionCallMap", functionCallMap.get("function:d:\Beatcoder\ext-test\two.ts:two"))
+        console.log("calls", calls)
         if (!calls) return;
 
         calls.forEach(calledFunctionId => {
+            console.log("calledFunctionId", calledFunctionId)
+            debugger
             // Skip unknown functions that we couldn't resolve
             if (calledFunctionId.includes('function:unknown:')) {
                 // Still add the unknown node for completeness, but don't recurse
@@ -658,13 +659,15 @@ export class CodeAnalyzer {
     }
 
     private createFunctionNode(functionId: string): GraphNode | null {
-        const parts = functionId.split(':');
-        if (parts.length < 3) return null;
+        const firstColon = functionId.indexOf(':');
+        const lastColon = functionId.lastIndexOf(':');
 
-        const [type, filePath, ...nameParts] = parts;
-        const name = nameParts.join(':');
+        if (firstColon === -1 || lastColon === -1 || firstColon === lastColon) return null;
 
-        // Try to get position information
+        const type = functionId.substring(0, firstColon);
+        const filePath = functionId.substring(firstColon + 1, lastColon);
+        const name = functionId.substring(lastColon + 1);
+
         const sourceFile = this.program!.getSourceFile(filePath);
         let line: number | undefined;
         let column: number | undefined;
@@ -675,7 +678,7 @@ export class CodeAnalyzer {
                 line = position?.line;
                 column = position?.column;
             } else if (type === 'method') {
-                const [className, methodName] = nameParts;
+                const [className, methodName] = name.split('.');
                 const position = this.findMethodPosition(sourceFile, className, methodName);
                 line = position?.line;
                 column = position?.column;
@@ -685,12 +688,13 @@ export class CodeAnalyzer {
         return {
             id: functionId,
             name: name,
-            type: type === 'method' ? 'function' : type as any,
+            type: type === 'method' ? 'function' : (type as any),
             filePath: filePath,
             line: line,
             column: column
         };
     }
+
 
     private findFunctionPosition(sourceFile: ts.SourceFile, functionName: string): { line: number, column: number } | null {
         let result: { line: number, column: number } | null = null;
@@ -750,7 +754,7 @@ export class CodeAnalyzer {
 
     private extractFunctionsFromFile(sourceFile: ts.SourceFile): GraphNode[] {
         const functions: GraphNode[] = [];
-        const filePath = sourceFile.fileName;
+        const filePath = path.normalize(sourceFile.fileName);
 
         const visit = (node: ts.Node) => {
             // Handle function declarations
@@ -809,7 +813,6 @@ export class CodeAnalyzer {
         if (importPath.startsWith('.')) {
             // Relative import
             const resolved = path.resolve(path.dirname(currentFile), importPath);
-
             // Try different extensions
             const extensions = ['.ts', '.tsx', '.js', '.jsx'];
             for (const ext of extensions) {
